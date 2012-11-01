@@ -10,6 +10,9 @@ LOCAL_C_INCLUDES := \
 	hardware/samsung_slsi/exynos/include \
 	hardware/samsung_slsi/exynos/libexynosutils
 
+LOCAL_SHARED_LIBRARIES += libion_exynos
+LOCAL_C_INCLUDES += hardware/samsung_slsi/exynos5/include
+
 LOCAL_MODULE_TAGS := optional
 LOCAL_MODULE := exynosv4l2_test
 
