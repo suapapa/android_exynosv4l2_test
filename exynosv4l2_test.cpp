@@ -8,8 +8,26 @@
 
 #include <exynos_v4l2.h>
 
+/* Choose one */
+/* #define USE_SENSOR_MT9P111 */
+#define USE_SENSOR_S5K3H5
+/* #define USE_SENSOR_S5K4ECGX */
+
 #define DEV_MEDIA "/dev/media1"
+
+#ifdef USE_SENSOR_MT9P111
 #define ME_NAME_SENSOR "mt9p111"
+#endif
+
+#ifdef USE_SENSOR_S5K4ECGX
+#define ME_NAME_SENSOR "S5K4ECGX 4-003c"
+#endif
+
+#ifdef USE_SENSOR_S5K3H5
+#define ME_NAME_SENSOR "s5k3h5"
+#endif
+
+#define ME_NAME_CSIS_SD "s5p-mipi-csis.0"
 #define ME_NAME_FLITE_SD "flite-subdev.0"
 #define ME_NAME_FLITE_VD "exynos-fimc-lite.0"
 #define ME_NAME_GSC_SD "gsc-cap-subdev.0"
@@ -54,7 +72,12 @@ static int setupMediaLinksForCamera(void)
         return -1;
     }
 
+#ifndef USE_SENSOR_MT9P111
+    _mcSetupLink(md, ME_NAME_SENSOR, ME_NAME_CSIS_SD);
+    _mcSetupLink(md, ME_NAME_CSIS_SD, ME_NAME_FLITE_SD);
+#else
     _mcSetupLink(md, ME_NAME_SENSOR, ME_NAME_FLITE_SD);
+#endif
     _mcSetupLink(md, ME_NAME_FLITE_SD, ME_NAME_FLITE_VD);
     _mcSetupLink(md, ME_NAME_FLITE_SD, ME_NAME_GSC_SD);
     _mcSetupLink(md, ME_NAME_GSC_SD, ME_NAME_GSC_VD);
@@ -64,7 +87,7 @@ static int setupMediaLinksForCamera(void)
 }
 
 #define EXYNOSV4L2_TEST_NUM_PLANES 1
-#define MAX_CAM_BUF_CNT 8
+#define MAX_CAM_BUF_CNT 4
 
 static ion_client gIonClient = NULL;
 static ion_buffer gIonBuffer[MAX_CAM_BUF_CNT] = {NULL, };
@@ -88,7 +111,8 @@ static void initIonBufs(unsigned int size, unsigned int cnt)
 
     ALOGI("alloc and mapping %d buffers of %d bytes each...", cnt, size);
     for (unsigned int i = 0; i < cnt; i++) {
-        gIonBuffer[i] = ion_alloc(gIonClient, size, 0, ION_HEAP_EXYNOS_MASK);
+        gIonBuffer[i] = ion_alloc(gIonClient, size, 4 * 1024,
+			/* ION_HEAP_EXYNOS_VIDEO_MASK */(ION_HEAP_EXYNOS_CONTIG_MASK | (1 << (32-3))));
         gBuffer[i] = (char*)ion_map(gIonBuffer[i], size, 0);
     }
 }
@@ -171,30 +195,39 @@ exit_capture:
     return qBuf(fd, bufIdx);
 }
 
+
+static int setSuvdevFmt(const char* name, int pad, int w, int h, int fcode)
+{
+    int sd = exynos_subdev_open_devname(name, O_RDWR);
+    struct v4l2_subdev_format v4l2_sd_fmt;
+    v4l2_sd_fmt.pad = pad;
+    v4l2_sd_fmt.which = V4L2_SUBDEV_FORMAT_ACTIVE;
+    v4l2_sd_fmt.format.width = w;
+    v4l2_sd_fmt.format.height = h;
+    v4l2_sd_fmt.format.code = fcode;
+    int ret = exynos_subdev_s_fmt(sd, &v4l2_sd_fmt);
+    if (0 > ret) {
+        ALOGE("Failed to set subdev fmt");
+        return -1;
+    }
+
+    return exynos_subdev_close(sd);
+    /* return 0; */
+}
+
 static int openCamera(int capCnt)
 {
     int w, h, ret;
     int ion_fd = 0;
     struct ion_handle* ion_hdl = NULL;
 
+
+
     ALOGV("open...");
     int fd = exynos_v4l2_open_devname(ME_NAME_FLITE_VD, O_RDWR);
     if (0 > fd) {
         ALOGE("Failed to open video dev. for %s!", ME_NAME_FLITE_VD);
         return -1;
-    }
-
-    int sd = exynos_subdev_open_devname(ME_NAME_SENSOR, O_RDWR);
-    struct v4l2_subdev_format v4l2_sd_fmt;
-    v4l2_sd_fmt.pad = 0;
-    v4l2_sd_fmt.which = V4L2_SUBDEV_FORMAT_ACTIVE;
-    v4l2_sd_fmt.format.width = 800;
-    v4l2_sd_fmt.format.height = 480;
-    v4l2_sd_fmt.format.code = V4L2_MBUS_FMT_YUYV8_2X8;
-    ret = exynos_subdev_s_fmt(sd, &v4l2_sd_fmt);
-    if (0 > ret) {
-        ALOGE("Failed to set subdev fmt");
-        goto err_out;
     }
 
     ALOGV("s_input...");
@@ -205,8 +238,19 @@ static int openCamera(int capCnt)
     }
 
     ALOGV("s_fmt...");
-    w = 800;
+#ifdef USE_SENSOR_S5K3H5
+    w = 816;
+    h = 612;
+#else
+    w = 640;
     h = 480;
+#endif
+
+    setSuvdevFmt(ME_NAME_SENSOR, 0, w, h, V4L2_MBUS_FMT_YUYV8_2X8);
+    setSuvdevFmt(ME_NAME_CSIS_SD, 0, w, h, V4L2_MBUS_FMT_YUYV8_2X8);
+    setSuvdevFmt(ME_NAME_CSIS_SD, 1, w, h, V4L2_MBUS_FMT_YUYV8_2X8);
+    setSuvdevFmt(ME_NAME_FLITE_SD, 0, w, h, V4L2_MBUS_FMT_YUYV8_2X8);
+
     struct v4l2_format v4l2_fmt;
     memset(&v4l2_fmt, 0, sizeof(struct v4l2_format));
     v4l2_fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -261,7 +305,6 @@ static int openCamera(int capCnt)
 
 err_out:
     deinitIonBufs();
-    close(sd);
     exynos_v4l2_close(fd);
     return ret;
 }
